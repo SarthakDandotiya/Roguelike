@@ -5,3 +5,4 @@ authors = ["SarthakDandotiya <sarthak.dandotiya23@gmail.com>"]
 edition = "2018"
 
 [dependencies]
+tcod = "0.14"
