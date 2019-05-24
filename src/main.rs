@@ -1,3 +1,5 @@
+use rand::Rng;
+use std::cmp;
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::input::Key;
@@ -9,7 +11,11 @@ const SCREEN_HEIGHT: i32 = 50;
 const LIMIT_FPS: i32 = 30; // 30 Frames per Second Limit
 
 const MAP_WIDTH: i32 = 80;
-const MAP_HEIGHT: i32 = 45;
+const MAP_HEIGHT: i32 = 45; // Hight is a bit less to incorporate other features of the game that will be displayed in the left over part
+
+const ROOM_MAX_SIZE: i32 = 10;
+const ROOM_MIN_SIZE: i32 = 6;
+const MAX_ROOMS: i32 = 30;
 
 const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
 const COLOR_DARK_GROUND: Color = Color {
@@ -42,6 +48,39 @@ impl Tile {
     }
 }
 
+// A rectangle on the map, used to characterise a room.
+#[derive(Copy, Clone, Debug)]
+struct Rect {
+    x1: i32,
+    x2: i32,
+    y1: i32,
+    y2: i32,
+}
+
+impl Rect {
+    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Rect {
+            x1: x,
+            y1: y,
+            x2: x + w,
+            y2: y + h,
+        }
+    }
+
+    pub fn center(&self) -> (i32, i32) {
+        let center_x = (self.x1 + self.x2) / 2;
+        let center_y = (self.y1 + self.y2) / 2;
+        (center_x, center_y)
+    }
+
+    pub fn intersects_with(&self, other: &Rect) -> bool {
+        (self.x1 <= other.x2)
+            && (self.x2 >= other.x1)
+            && (self.y1 <= other.y2)
+            && (self.y2 >= other.y1)
+    }
+}
+
 // Object to reuse for anything representable by a character on the screen
 #[derive(Debug)]
 struct Object {
@@ -71,15 +110,89 @@ impl Object {
     }
 }
 
-fn make_map() -> Map {
-    // fill map with "unblocked" tiles
-    let mut map = vec![vec![Tile::empty(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
+fn create_room(room: Rect, map: &mut Map) {
+    // makes tiles within the rectangle passable
+    for x in (room.x1 + 1)..room.x2 {
+        for y in (room.y1 + 1)..room.y2 {
+            map[x as usize][y as usize] = Tile::empty();
+        }
+    }
+}
 
-    // place two pillars to test the map
-    map[30][22] = Tile::wall();
-    map[50][22] = Tile::wall();
+fn make_map() -> (Map, (i32, i32)) {
+    // fill map with "blocked" tiles
+    let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
-    map
+    let mut rooms = vec![];
+
+    let mut starting_position = (0, 0);
+
+    for _ in 0..MAX_ROOMS {
+        // random width and height
+        let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+        let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+        // random position without going out of the boundaries of the map
+        let x = rand::thread_rng().gen_range(0, MAP_WIDTH - w);
+        let y = rand::thread_rng().gen_range(0, MAP_HEIGHT - h);
+
+        let new_room = Rect::new(x, y, w, h);
+
+        // check if other rooms intersect with the current one
+        let failed = rooms
+            .iter()
+            .any(|other_room| new_room.intersects_with(other_room));
+
+        if !failed {
+            // this means there are no intersections, so this room is valid
+
+            // "paint" it to the map's tiles
+            create_room(new_room, &mut map);
+
+            // center coordinates of the new room, will be useful later
+            let (new_x, new_y) = new_room.center();
+
+            if rooms.is_empty() {
+                // this is the first room, where the player starts at
+                starting_position = (new_x, new_y);
+            } else {
+                // all rooms after the first:
+                // connect it to the previous room with a tunnel
+
+                // center coordinates of the previous room
+                let (prev_x, prev_y) = rooms[rooms.len() - 1].center();
+
+                // toss a coin (random bool value -- either true or false)
+                if rand::random() {
+                    // first move horizontally, then vertically
+                    create_h_tunnel(prev_x, new_x, prev_y, &mut map);
+                    create_v_tunnel(prev_y, new_y, new_x, &mut map);
+                } else {
+                    // first move vertically, then horizontally
+                    create_v_tunnel(prev_y, new_y, prev_x, &mut map);
+                    create_h_tunnel(prev_x, new_x, new_y, &mut map);
+                }
+            }
+
+            // finally, append the new room to the list
+            rooms.push(new_room);
+        }
+    }
+
+    (map, starting_position)
+}
+
+// to carve a horizontal tunnel between rooms
+fn create_h_tunnel(x1: i32, x2: i32, y: i32, map: &mut Map) {
+    for x in cmp::min(x1, x2)..(cmp::max(x1, x2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
+}
+
+// to carve a vartical tunnel between rooms
+fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
+    for y in cmp::min(y1, y2)..(cmp::max(y1, y2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
 }
 
 fn handle_keys(root: &mut Root, player: &mut Object, map: &Map) -> bool {
@@ -140,17 +253,18 @@ fn main() {
 
     let mut con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
 
-    // Create player object
-    let player = Object::new(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, '@', WHITE);
+    // generate map (it isn't drawn onto the screen yet)
+    let (map, (player_x, player_y)) = make_map();
+
+    // object representing the player
+    // putting the player inside the first room
+    let player = Object::new(player_x, player_y, '@', WHITE);
 
     // Create NPC object
     let npc = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', YELLOW); // Non player characters shall be yellow
 
     // Holds all objects in an array
     let mut objects = [player, npc];
-
-    // generate map (at this point it's not drawn to the screen)
-    let map = make_map();
 
     while !root.window_closed() {
         // Clear screen of previous frame
